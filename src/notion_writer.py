@@ -102,6 +102,61 @@ def build_notion_table(videos):
     }
 
 
+def build_video_analysis_blocks(videos):
+    """Build Notion blocks with per-video analysis (heading + callout for each video).
+    
+    Returns a list of Notion blocks to append after the summary table.
+    """
+    from video_analyzer import analyze_video, format_analysis_plain
+    
+    blocks = []
+    
+    # Section heading
+    blocks.append({
+        "type": "heading_2",
+        "heading_2": {
+            "rich_text": [{"type": "text", "text": {"content": "逐条视频分析"}}]
+        }
+    })
+    
+    for i, v in enumerate(videos, 1):
+        analysis = analyze_video(v, videos)
+        
+        # Video heading with link
+        title_text = f"{i}. {v.get('title', '')[:60]}"
+        video_url = v.get("url", f"https://www.youtube.com/watch?v={v.get('id', '')}")
+        
+        blocks.append({
+            "type": "heading_3",
+            "heading_3": {
+                "rich_text": [{
+                    "type": "text",
+                    "text": {"content": title_text, "link": {"url": video_url}}
+                }]
+            }
+        })
+        
+        # Analysis as a callout block
+        analysis_text = format_analysis_plain(analysis)
+        
+        # Verdict emoji for callout icon
+        verdict = analysis.get("verdict", "")
+        icon = "🟢" if "🟢" in verdict else ("🟡" if "🟡" in verdict else "🔴")
+        
+        blocks.append({
+            "type": "callout",
+            "callout": {
+                "icon": {"type": "emoji", "emoji": icon},
+                "rich_text": [{"type": "text", "text": {"content": analysis_text}}]
+            }
+        })
+        
+        # Divider between videos
+        blocks.append({"type": "divider", "divider": {}})
+    
+    return blocks
+
+
 def build_page_title(brand_name):
     today = datetime.utcnow().strftime("%Y-%m-%d")
     return f"{brand_name} YouTube 广告数据 {today}"
@@ -120,15 +175,19 @@ if __name__ == "__main__":
 
     brand_name = videos[0]["brand"] if videos else args.brand
     table = build_notion_table(videos)
+    analysis_blocks = build_video_analysis_blocks(videos)
     title = build_page_title(brand_name)
 
     # Output the Notion API payload for the orchestrator to execute
+    # Page structure: summary table → per-video analysis callouts
     output = {
         "page_title": title,
         "brand": args.brand,
         "brand_name": brand_name,
         "parent_page_id": args.parent_page_id,
+        "children": [table] + analysis_blocks,
         "table_block": table,
+        "analysis_blocks": analysis_blocks,
         "video_count": len(videos),
         "total_views": sum(v["views"] for v in videos)
     }
@@ -140,7 +199,8 @@ if __name__ == "__main__":
     print(f"Notion payload saved to {output_path}")
     print(f"Page title: {title}")
     print(f"Videos: {len(videos)} | Total views: {sum(v['views'] for v in videos):,}")
+    print(f"Analysis blocks: {len(analysis_blocks)} (heading + {len(videos)} callouts)")
     print(f"\nTo create Notion page, use Composio NOTION_CREATE_A_NEW_PAGE with:")
     print(f"  parent_page_id: {args.parent_page_id or '(set in config.json)'}")
     print(f"  title: {title}")
-    print(f"  children: [table_block from {output_path}]")
+    print(f"  children: page payload from {output_path}")

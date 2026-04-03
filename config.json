@@ -45,6 +45,8 @@
       "估算花费"
     ],
     "required_fields": ["title", "url", "published", "duration", "ad_type", "views", "likes", "engagement", "spend_estimate"],
-    "format_notes": "视频标题必须带可点击YouTube链接；使用Notion原生table block而非bulleted list；所有字段不可省略"
+    "format_notes": "视频标题必须带可点击YouTube链接；使用Notion原生table block而非bulleted list；所有字段不可省略",
+    "per_video_analysis": true,
+    "analysis_dimensions": ["metric_interpretation", "strategy_insight", "reference_value", "verdict"]
   }
 }

@@ -68,18 +68,29 @@ def build_report(videos, brand_name, lookback_days=30):
         lines.append(f"| {t} 广告数 | {c} |")
     lines.append("")
 
-    # Full video list
-    lines.append("## 视频列表（按播放量排序）\n")
-    lines.append("| # | 视频 | 时长 | 播放量 | 点赞 | 互动率 | 广告类型 | 发布日期 |")
-    lines.append("|---|------|------|--------|------|--------|----------|----------|")
+    # Full video list with per-video analysis
+    lines.append("## 视频详细分析（按播放量排序）\n")
 
     for i, v in enumerate(videos, 1):
-        title = v["title"].replace("|", "\\|")[:60]
+        title = v["title"].replace("|", "\\|")
         vid_id = v["id"]
         link = f"[{title}](https://www.youtube.com/watch?v={vid_id})"
         dur = f"{v['duration_s']//60}:{v['duration_s']%60:02d}"
         eng = f"{v['engagement_rate']:.2f}%" if v['engagement_rate'] >= 0.01 else f"{v['engagement_rate']:.4f}%"
-        lines.append(f"| {i} | {link} | {dur} | {fmt_views(v['views'])} | {v['likes']:,} | {eng} | {v['ad_type']} | {v['published']} |")
+        spend_low = v["estimated_spend"]["low"]
+        spend_high = v["estimated_spend"]["high"]
+
+        lines.append(f"### {i}. {link}")
+        lines.append(f"| 时长 | 广告类型 | 播放量 | 点赞 | 互动率 | 估算花费 | 发布日期 |")
+        lines.append(f"|------|----------|--------|------|--------|----------|----------|")
+        lines.append(f"| {dur} | {v['ad_type']} | {fmt_views(v['views'])} | {v['likes']:,} | {eng} | ${spend_low:,}~${spend_high:,} | {v['published']} |")
+        lines.append("")
+
+        # Per-video analysis
+        from video_analyzer import analyze_video, format_analysis_markdown
+        analysis = analyze_video(v, videos)
+        lines.append(format_analysis_markdown(analysis))
+        lines.append("\n---\n")
 
     # Recent activity section
     recent = [v for v in videos if v["published"] >= cutoff]
