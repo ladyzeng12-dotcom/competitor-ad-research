@@ -1,0 +1,37 @@
+{
+  "competitors": {
+    "lovable": {
+      "name": "Lovable",
+      "advertiser_id": "AR00393402838056697857",
+      "youtube_channel_id": null
+    },
+    "manus": {
+      "name": "Manus AI",
+      "advertiser_id": "AR09498705498861977601",
+      "youtube_channel_id": null
+    }
+  },
+  "settings": {
+    "region": "anywhere",
+    "format": "VIDEO",
+    "lookback_days": 30,
+    "scroll_rounds": 5,
+    "scroll_wait_sec": 2,
+    "page_load_timeout_ms": 60000
+  },
+  "ad_classification": {
+    "bumper_max_sec": 7,
+    "non_skippable_max_sec": 16,
+    "skippable_max_sec": 60,
+    "budget_estimates": {
+      "bumper_cpm_range": [8, 15],
+      "non_skippable_cpm_range": [8, 15],
+      "skippable_cpv_range": [0.02, 0.06]
+    }
+  },
+  "output": {
+    "notion_parent_page": null,
+    "report_format": "per_competitor",
+    "include_video_links": true
+  }
+}
