@@ -48,35 +48,56 @@ def text_cell(text, link=None):
     return [c]
 
 
-def build_notion_table(videos):
-    """Build a Notion table block from video stats."""
-    headers = ["#", "视频名称", "YouTube 链接", "时长", "播放量", "点赞", "评论", "互动率", "广告类型", "发布日期"]
+def fmt_money(v):
+    """Format spend estimate."""
+    if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
+    if v >= 1_000: return f"${v/1000:.1f}K"
+    return f"${v:.0f}"
 
-    rows = [{"cells": [text_cell(h) for h in headers]}]
+
+def bold_cell(text):
+    """Build a bold Notion rich text cell."""
+    return [{"type": "text", "text": {"content": str(text)}, "annotations": {"bold": True}}]
+
+
+def build_notion_table(videos):
+    """Build a Notion table block from video stats.
+    
+    REQUIRED columns (do NOT omit any):
+      #, 视频标题（点击跳转）, 发布日期, 时长, 广告类型, 播放量, 点赞, 互动率, 估算花费
+    
+    Video title MUST be a clickable YouTube link.
+    """
+    headers = ["#", "视频标题（点击跳转）", "发布日期", "时长", "广告类型", "播放量", "点赞", "互动率", "估算花费"]
+
+    header_row = {"type": "table_row", "table_row": {"cells": [bold_cell(h) for h in headers]}}
+    data_rows = []
 
     for i, v in enumerate(videos, 1):
-        dur = f"{v['duration_s']//60}:{v['duration_s']%60:02d}"
-        eng = f"{v['engagement_rate']:.2f}%" if v['engagement_rate'] >= 0.01 else f"{v['engagement_rate']:.4f}%"
+        dur = v.get("duration") or f"{v['duration_s']//60}:{v['duration_s']%60:02d}"
+        eng = f"{v.get('engagement_rate', v.get('engagement', 0)):.2f}%"
+        spend_low = v.get("spend_low", 0)
+        spend_high = v.get("spend_high", 0)
+        spend_str = f"{fmt_money(spend_low)}~{fmt_money(spend_high)}"
 
-        rows.append({"cells": [
+        data_rows.append({"type": "table_row", "table_row": {"cells": [
             text_cell(str(i)),
-            text_cell(v["title"][:80]),
-            text_cell(v["url"], link=v["url"]),
+            text_cell(v["title"][:60], link=v.get("url")),  # clickable title
+            text_cell(v.get("published", "?")),
             text_cell(dur),
-            text_cell(f"{fmt_views(v['views'])}（{v['views']:,}）"),
-            text_cell(f"{v['likes']:,}"),
-            text_cell(str(v["comments"])),
+            text_cell(v.get("ad_type", "?")),
+            text_cell(f"{v['views']:,}"),
+            text_cell(f"{v.get('likes', 0):,}"),
             text_cell(eng),
-            text_cell(v["ad_type"]),
-            text_cell(v["published"])
-        ]})
+            text_cell(spend_str),
+        ]}})
 
     return {
         "type": "table",
         "table": {
             "table_width": len(headers),
             "has_column_header": True,
-            "children": rows
+            "children": [header_row] + data_rows
         }
     }
 

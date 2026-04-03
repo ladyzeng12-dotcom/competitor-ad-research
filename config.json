@@ -32,6 +32,19 @@
   "output": {
     "notion_parent_page": null,
     "report_format": "per_competitor",
-    "include_video_links": true
+    "include_video_links": true,
+    "notion_table_columns": [
+      "#",
+      "视频标题（点击跳转）",
+      "发布日期",
+      "时长",
+      "广告类型",
+      "播放量",
+      "点赞",
+      "互动率",
+      "估算花费"
+    ],
+    "required_fields": ["title", "url", "published", "duration", "ad_type", "views", "likes", "engagement", "spend_estimate"],
+    "format_notes": "视频标题必须带可点击YouTube链接；使用Notion原生table block而非bulleted list；所有字段不可省略"
   }
 }
