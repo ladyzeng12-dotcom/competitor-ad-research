@@ -5,6 +5,7 @@
 ## ✨ 核心能力
 
 - **TC 广告抓取**：通过 Chrome DevTools Protocol (CDP) 绕过 Google Ads TC 的 safeframe 隔离，拦截跨域请求提取 YouTube 视频 ID（包括 Unlisted 广告素材）
+- **Creative → Video 精确映射**：通过逐一加载 Creative 详情页，捕获 YouTube embed 请求，精确映射每个广告创意对应的视频
 - **视频数据拉取**：批量获取视频标题、时长、播放量、点赞、评论、发布日期等
 - **广告类型自动分类**：根据视频时长自动判断 Bumper / Non-skippable / Skippable / Long-form
 - **预算估算**：基于播放量和行业 CPM/CPV 基准估算广告花费
@@ -20,7 +21,7 @@ competitor-ad-research/
 ├── .gitignore
 ├── src/
 │   ├── main.py             # 主入口 — 串联完整流水线
-│   ├── tc_scraper.py       # Step 1: CDP 拦截 TC 广告
+│   ├── tc_scraper.py       # Step 1: CDP 拦截 TC 广告（三阶段）
 │   ├── youtube_fetcher.py  # Step 2: YouTube API 拉取 + 分类
 │   ├── report_builder.py   # Step 3: 生成 Markdown 报告
 │   └── notion_writer.py    # Step 4: 构建 Notion 表格数据
@@ -82,11 +83,14 @@ python src/main.py lovable --skip-notion
 也可以单独运行每个步骤：
 
 ```bash
-# Step 1: 抓取 TC 广告，提取 YouTube ID
+# Step 1: 抓取 TC 广告，提取 YouTube ID + Creative 映射
 python src/tc_scraper.py lovable
 
-# Step 2: 用提取的 ID 调 YouTube Data API（需要 API 访问）
-# 将 API 响应保存到 data/api_response_lovable.json
+# 跳过 Phase 2/3（仅做列表页拦截，不逐个加载 Creative 详情页）
+python src/tc_scraper.py lovable --skip-detail
+
+# Step 2: 用提取的 ID 调 YouTube Data API
+python src/youtube_fetcher.py lovable
 
 # Step 3: 生成报告
 python src/report_builder.py lovable
@@ -115,9 +119,41 @@ python src/notion_writer.py lovable --parent-page-id <your_page_id>
 
 ## 🔧 技术说明
 
-### TC Safeframe 绕过
+### TC Safeframe 绕过（三阶段方案）
 
-Google Ads TC 将广告创意渲染在 safeframe iframe 中，常规 DOM 操作无法跨域访问。本工具通过 Playwright 的 CDP (Chrome DevTools Protocol) 在浏览器层面拦截所有网络请求，包括 safeframe 内部的跨域请求，从而提取 `ytimg.com` 缩略图和 YouTube 嵌入 URL 中的视频 ID。
+Google Ads TC 将广告创意渲染在 safeframe iframe 中，常规 DOM 操作无法跨域访问。本工具通过 **三阶段网络请求拦截** 提取 YouTube 视频 ID 并建立精确的 Creative → Video 映射：
+
+**Phase 1: 列表页 CDP 拦截**
+- 通过 Playwright 的 CDP (Chrome DevTools Protocol) 在浏览器层面拦截所有网络请求
+- 捕获 `ytimg.com/vi/{VIDEO_ID}/` 缩略图请求和 `youtube.com/embed/{VIDEO_ID}` 嵌入请求
+- 列表页会一次性加载所有广告的缩略图，因此能获取完整的视频 ID 集合
+- 同时监听 API 响应体，从中提取额外的视频 ID
+
+**Phase 2: Creative ID 提取**
+- 从列表页的 `<a href="...creative/CR...">` 链接中提取所有 Creative ID (CR格式)
+- 每个 CR ID 对应 Google Ads 中的一条独立广告创意
+
+**Phase 3: Creative → Video 精确映射**（核心创新）
+- 逐一加载每个 Creative 的详情页 (`/advertiser/{AR_ID}/creative/{CR_ID}`)
+- 详情页只会为**当前 Creative** 触发 YouTube embed 请求
+- 通过捕获 `youtube.com/embed/{VIDEO_ID}` 请求，精确映射 CR_ID → VIDEO_ID
+- 解决了列表页一次性加载所有缩略图导致无法区分的问题
+
+> 💡 **为什么需要 Phase 3？** 列表页加载时，所有广告的 YouTube 缩略图 (`ytimg.com`) 会同时加载，无法判断哪个视频属于哪个广告。但打开单个 Creative 详情页时，YouTube embed iframe 只会加载该 Creative 对应的视频，从而实现精确映射。
+
+```
+列表页请求:
+  ytimg.com/vi/VIDEO_A/  ← 所有广告的缩略图混在一起
+  ytimg.com/vi/VIDEO_B/
+  ytimg.com/vi/VIDEO_C/
+  → 无法区分哪个视频属于哪个 Creative
+
+详情页请求（Creative CR_001）:
+  youtube.com/embed/VIDEO_A  ← 只有这一个 embed 请求
+  ytimg.com/vi/VIDEO_A/      ← 当前 Creative 的缩略图
+  ytimg.com/vi/VIDEO_B/      ← 其他 Creative 的缩略图（来自推荐区域）
+  → embed 请求 = 精确映射
+```
 
 ### YouTube API 集成
 
@@ -138,6 +174,7 @@ Step 4 生成 Notion API 格式的表格数据，需配合 Notion API 或 Compos
 ## ⚠️ 注意事项
 
 - TC 的页面结构可能随时变化，CDP 拦截策略可能需要适配
+- Phase 3 会逐个加载 Creative 详情页，10 个 Creative 约需 2-3 分钟，可用 `--skip-detail` 跳过
 - YouTube API 有配额限制（每天 10,000 units），大规模抓取需注意
 - 预算估算基于行业平均值，实际花费可能有较大偏差
 - 本工具仅用于公开信息的合法调研
