@@ -13,6 +13,7 @@ Tables updated:
   - ga_device_metrics
   - ga_events_by_campaign
   - ga_events_by_creative
+  - ga_device_platform_metrics
 
 GA4 property: properties/531750988 (surething.io)
 Composio connection: ca_RSYDB79eiRxh
@@ -272,6 +273,28 @@ def sync_ga_events_by_creative(date_ranges):
     appdb_upsert("ga_events_by_creative", rows, ["date", "campaign_name", "ad_group", "ad_content", "event_name"])
 
 
+def sync_ga_device_platform_metrics(date_ranges):
+    print("[ga_device_platform_metrics]", flush=True)
+    dims = ["date", "deviceCategory", "platform"]
+    mets = ["sessions", "activeUsers", "newUsers", "keyEvents", "bounceRate", "averageSessionDuration"]
+    raw_rows = run_ga4_report(dims, mets, date_ranges)
+    rows = []
+    for r in raw_rows:
+        p = parse_row(r, dims, mets)
+        rows.append({
+            "date": normalize_date(p["date"]),
+            "device_category": p["deviceCategory"],
+            "platform": p["platform"],
+            "sessions": safe_int(p["sessions"]),
+            "active_users": safe_int(p["activeUsers"]),
+            "new_users": safe_int(p["newUsers"]),
+            "key_events": safe_int(p["keyEvents"]),
+            "bounce_rate": safe_float(p["bounceRate"]),
+            "avg_session_duration": safe_float(p["averageSessionDuration"]),
+        })
+    appdb_upsert("ga_device_platform_metrics", rows, ["date", "device_category", "platform"])
+
+
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
@@ -291,6 +314,7 @@ def main():
     sync_ga_device_metrics(date_ranges)
     sync_ga_events_by_campaign(date_ranges)
     sync_ga_events_by_creative(date_ranges)
+    sync_ga_device_platform_metrics(date_ranges)
 
     print("Done.", flush=True)
 
