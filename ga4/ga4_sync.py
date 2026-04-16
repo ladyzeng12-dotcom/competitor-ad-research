@@ -1,23 +1,9 @@
 #!/usr/bin/env python3
 """
 GA4 → AppDB sync script
-Usage: python3 ga4/ga4_sync.py <start_date> <end_date>
-  e.g. python3 ga4/ga4_sync.py 2026-04-09 2026-04-11
-       python3 ga4/ga4_sync.py yesterday yesterday
-
-Tables updated:
-  - ga_daily_metrics
-  - ga_channel_metrics
-  - ga_source_medium_metrics
-  - ga_landing_page_metrics
-  - ga_device_metrics
-  - ga_events_by_campaign
-  - ga_events_by_creative
-  - ga_device_platform_metrics
-
-GA4 property: properties/531750988 (surething.io)
-Composio connection: ca_RSYDB79eiRxh
-Scheduled: daily 08:00 Asia/Shanghai (syncs previous day)
+Usage: python3 src/ga4_sync.py <start_date> <end_date>
+  e.g. python3 src/ga4_sync.py 2026-04-09 2026-04-11
+       python3 src/ga4_sync.py yesterday yesterday
 """
 
 import sys
@@ -65,41 +51,53 @@ def parse_row(row, dim_names, met_names):
         out[name] = row["metricValues"][i]["value"] if i < len(row.get("metricValues", [])) else "0"
     return out
 
-def appdb_upsert(table: str, rows: list, pk_cols: list):
-    """Upsert rows into AppDB via surething CLI."""
+def appdb_upsert(table: str, rows: list, pk_cols: list, batch_size: int = 100):
+    """Upsert rows into AppDB via surething CLI. Batches large datasets to avoid
+    Argument list too long OS errors when the SQL string exceeds shell limits."""
     if not rows:
         print(f"  No rows to upsert into {table}", flush=True)
         return
     col_names = list(rows[0].keys())
-    values_parts = []
-    for row in rows:
-        vals = []
-        for c in col_names:
-            v = row.get(c, "")
-            if isinstance(v, str):
-                v = v.replace("'", "''")
-                vals.append(f"'{v}'")
-            else:
-                vals.append(str(v))
-        values_parts.append(f"({', '.join(vals)})")
-
     conflict_cols = ", ".join(pk_cols)
     update_set = ", ".join(
         f"{c} = excluded.{c}" for c in col_names if c not in pk_cols
     )
-    sql = (
-        f"INSERT INTO {table} ({', '.join(col_names)}) VALUES "
-        + ", ".join(values_parts)
-        + f" ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}, updated_at = datetime('now')"
-    )
-    result = subprocess.run(
-        ["surething", "appdb", "exec-sql", sql],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  DB ERROR for {table}: {result.stderr}", flush=True)
+
+    total_upserted = 0
+    errors = 0
+    for batch_start in range(0, len(rows), batch_size):
+        batch = rows[batch_start: batch_start + batch_size]
+        values_parts = []
+        for row in batch:
+            vals = []
+            for c in col_names:
+                v = row.get(c, "")
+                if isinstance(v, str):
+                    v = v.replace("'", "''")
+                    vals.append(f"'{v}'")
+                else:
+                    vals.append(str(v))
+            values_parts.append(f"({', '.join(vals)})")
+
+        sql = (
+            f"INSERT INTO {table} ({', '.join(col_names)}) VALUES "
+            + ", ".join(values_parts)
+            + f" ON CONFLICT ({conflict_cols}) DO UPDATE SET {update_set}, updated_at = datetime('now')"
+        )
+        result = subprocess.run(
+            ["surething", "appdb", "exec-sql", sql],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"  DB ERROR for {table} (batch {batch_start}): {result.stderr}", flush=True)
+            errors += 1
+        else:
+            total_upserted += len(batch)
+
+    if errors == 0:
+        print(f"  Upserted {total_upserted} rows into {table}", flush=True)
     else:
-        print(f"  Upserted {len(rows)} rows into {table}", flush=True)
+        print(f"  Upserted {total_upserted} rows into {table} ({errors} batch ERROR(s))", flush=True)
 
 def normalize_date(d: str) -> str:
     """Convert GA4 YYYYMMDD to YYYY-MM-DD."""
@@ -273,6 +271,36 @@ def sync_ga_events_by_creative(date_ranges):
     appdb_upsert("ga_events_by_creative", rows, ["date", "campaign_name", "ad_group", "ad_content", "event_name"])
 
 
+def sync_ga_landing_page_events(date_ranges):
+    print("[ga_landing_page_events]", flush=True)
+    dims = ["date", "landingPage", "eventName"]
+    mets = ["eventCount", "activeUsers"]
+    dim_filter = {
+        "filter": {
+            "fieldName": "eventName",
+            "inListFilter": {
+                "values": [
+                    "session_start", "first_visit", "page_view", "scroll",
+                    "form_start", "sign_up", "checkout_initiated", "purchase",
+                    "user_engagement", "click"
+                ]
+            }
+        }
+    }
+    raw_rows = run_ga4_report(dims, mets, date_ranges, dimension_filter=dim_filter)
+    rows = []
+    for r in raw_rows:
+        p = parse_row(r, dims, mets)
+        rows.append({
+            "date": normalize_date(p["date"]),
+            "landing_page": p["landingPage"],
+            "event_name": p["eventName"],
+            "event_count": safe_int(p["eventCount"]),
+            "active_users": safe_int(p["activeUsers"]),
+        })
+    appdb_upsert("ga_landing_page_events", rows, ["date", "landing_page", "event_name"])
+
+
 def sync_ga_device_platform_metrics(date_ranges):
     print("[ga_device_platform_metrics]", flush=True)
     dims = ["date", "deviceCategory", "platform"]
@@ -315,6 +343,7 @@ def main():
     sync_ga_events_by_campaign(date_ranges)
     sync_ga_events_by_creative(date_ranges)
     sync_ga_device_platform_metrics(date_ranges)
+    sync_ga_landing_page_events(date_ranges)
 
     print("Done.", flush=True)
 
