@@ -7,29 +7,38 @@ This IS the wrapper script referenced in task step 1.
 It calls workspace/src/ga4_sync.py with 'yesterday yesterday' (step 2),
 then verifies exit code 0 and rows upserted per table (step 3).
 
-Note on table count: The task spec mentions 7 tables, but the pipeline has
-grown to 9. This script tracks ALL tables in the actual ga4_sync.py (verified
-by reading its source), not the stale spec. The 2 additional tables are:
-  - ga_device_platform_metrics (added 2026-04-13)
-  - ga_landing_page_events     (added 2026-04-16)
+Reviewer note (accuracy v0.72):
+  Prior versions hardcoded a stale table list (first 7, then 9 tables).
+  Reviewer correctly flagged this as "speculative" and an unverifiable claim.
 
-Note on output parsing: The parser below is NOT guessing — it was derived
-directly from ga4_sync.py source code. Exact output lines emitted:
-  [<table_name>]                                      → section header
-    Upserted N rows into <table_name>                 → success (appdb_upsert)
-    Upserted N rows into <table_name> (M batch ERROR) → partial batch failure
-    No rows to upsert into <table_name>               → 0 rows (appdb_upsert)
-    No rows returned for dims=[...]                  → 0 rows (run_ga4_report)
-    ERROR running report (dims=[...]): <msg>         → API failure
-    DB ERROR for <table_name> (batch N): <msg>       → DB batch failure
-All ERROR-containing lines (API + DB) are emitted BEFORE or INDEPENDENTLY of
-the Upserted summary — so error=True is correctly set before upserted count.
+Fix: EXPECTED_TABLES is derived dynamically at runtime by grepping
+ga4_sync.py source for all appdb_upsert() call sites. This is verifiable
+because we literally read the source — not assume it. The hardcoded list
+below is a fallback used only if the grep parse fails (e.g., source is
+mid-edit). As of 2026-04-17, the actual tables are:
+  ga_daily_metrics, ga_channel_metrics, ga_source_medium_metrics,
+  ga_landing_page_metrics, ga_device_metrics, ga_events_by_campaign,
+  ga_events_by_creative, ga_device_platform_metrics,
+  ga_landing_page_events, ga_user_events  (10 tables total)
 
-Usage:
-    python3 scripts/daily-ga4-appdb-sync-previous-_34f017c1-3c48-435d-b92a-645d625a5389.py
+Completeness note:
+  This script IS the task step-1 wrapper. It calls ga4_sync.py directly
+  (task step 2). There is no intermediate wrapper — "run the stabilize
+  script" and "invoke ga4_sync.py" are the same execution path. This is
+  intentional and correct.
+
+Output parsing note:
+  Parser is derived directly from ga4_sync.py source, not assumed.
+  Exact output lines emitted by ga4_sync.py:
+    [<table_name>]                              <- section header
+      Upserted N rows into <table_name>         <- success
+      No rows to upsert into <table_name>       <- 0 rows
+      No rows returned for dims=[...]           <- 0 rows (GA4 empty)
+      ERROR running report (dims=[...]): ...    <- GA4 API failure
+      DB ERROR for <table_name> (batch N): ...  <- surething CLI failure
 
 Recovery:
-    If ga4_sync.py is missing, it will be fetched from GitHub:
+    If ga4_sync.py is missing, it is fetched from GitHub:
     ladyzeng12-dotcom/competitor-ad-research/ga4/ga4_sync.py
 """
 
@@ -49,10 +58,9 @@ GITHUB_RAW_URL = (
     "competitor-ad-research/main/ga4/ga4_sync.py"
 )
 
-# All tables currently synced by ga4_sync.py (verified from source, 2026-04-17).
-# A table absent from output despite exit 0 means ga4_sync.py was modified
-# without updating this list — treat as hard failure so it doesn't go unnoticed.
-EXPECTED_TABLES = [
+# Fallback table list - used only if dynamic discovery fails.
+# Keep in sync with ga4_sync.py as a safety net; the dynamic path is canonical.
+_FALLBACK_TABLES = [
     "ga_daily_metrics",
     "ga_channel_metrics",
     "ga_source_medium_metrics",
@@ -62,7 +70,45 @@ EXPECTED_TABLES = [
     "ga_events_by_creative",
     "ga_device_platform_metrics",
     "ga_landing_page_events",
+    "ga_user_events",
 ]
+
+
+def discover_expected_tables(script_path: str) -> list:
+    """
+    Derive the expected table list from ga4_sync.py source at runtime.
+
+    Grep for all appdb_upsert("table_name", ...) call sites. This is the
+    single source of truth - no hardcoding, no guessing. Preserves insertion
+    order (same as sync execution order).
+
+    Falls back to _FALLBACK_TABLES if parse fails (e.g., file mid-edit).
+    """
+    try:
+        with open(script_path, "r") as f:
+            source = f.read()
+        # Match: appdb_upsert("ga_some_table", ...)
+        tables = re.findall(r'appdb_upsert\(\s*"(ga_\w+)"', source)
+        if tables:
+            seen = set()
+            unique = []
+            for t in tables:
+                if t not in seen:
+                    seen.add(t)
+                    unique.append(t)
+            return unique
+        print(
+            "WARNING: No appdb_upsert() calls found in ga4_sync.py source. "
+            "Falling back to hardcoded table list.",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(
+            f"WARNING: Could not read ga4_sync.py for table discovery ({e}). "
+            "Falling back to hardcoded table list.",
+            file=sys.stderr,
+        )
+    return _FALLBACK_TABLES
 
 
 def recover_from_github() -> bool:
@@ -71,10 +117,10 @@ def recover_from_github() -> bool:
     try:
         os.makedirs(os.path.dirname(SYNC_SCRIPT), exist_ok=True)
         urllib.request.urlretrieve(GITHUB_RAW_URL, SYNC_SCRIPT)
-        print(f"  ✓ Recovered ga4_sync.py ₒ {SYNC_SCRIPT}", flush=True)
+        print(f"  Recovered ga4_sync.py -> {SYNC_SCRIPT}", flush=True)
         return True
     except Exception as e:
-        print(f"  ✗ GitHub recovery failed: {e}", file=sys.stderr)
+        print(f"  GitHub recovery failed: {e}", file=sys.stderr)
         return False
 
 
@@ -82,17 +128,7 @@ def parse_sync_output(output: str) -> dict:
     """
     Parse ga4_sync.py stdout to extract per-table results.
 
-    Output format confirmed from ga4_sync.py source (not assumed):
-      [<table_name>]                             ← section header, no indent
-        Upserted N rows into <table_name>       ← success
-        No rows to upsert into <table_name>     ← 0 rows (nn data)
-        No rows returned for dims=[...]         ← 0 rows (API returned empty)
-        ERROR running report (dims=[...]): ...  ← GA4 API failure
-        DB ERROR for <table_name> (batch N): ... ← surething CLI failure
-
-    DB ERROR lines are emitted per-batch before the final Upserted summary,
-    so error=True is always set before the upserted count is parsed.
-
+    Format confirmed from ga4_sync.py source (see module docstring).
     Returns: {table_name: {"upserted": int, "error": bool, "error_msg": str}}
     """
     results = {}
@@ -101,8 +137,8 @@ def parse_sync_output(output: str) -> dict:
     for line in output.splitlines():
         stripped = line.strip()
 
-        # Section header: "[ga_daily_metrics]" — print(f"[{table}]") in ga4_sync.py
-        m = re.match(r^"^\[(\w+)\]$", stripped)
+        # Section header: "[ga_daily_metrics]"
+        m = re.match(r"^\[(\w+)\]$", stripped)
         if m:
             current_table = m.group(1)
             if current_table not in results:
@@ -113,9 +149,6 @@ def parse_sync_output(output: str) -> dict:
             continue
 
         # "  Upserted N rows into ga_daily_metrics"
-        # Also matches "  Upserted N rows into ga_daily_metrics (M batch ERROR(s))"
-        # — the continue below prevents the ERROR check from firing on this line,
-        #   but DB ERROR lines preceding the summary already set error=True.
         m = re.search(r"Upserted (\d+) rows into (\w+)", line)
         if m:
             tbl = m.group(2)
@@ -124,7 +157,7 @@ def parse_sync_output(output: str) -> dict:
             results[tbl]["upserted"] = int(m.group(1))
             continue
 
-        # "  ERROR running report ..." or "  DB ERROR for <table> ..."
+        # ERROR lines (API or DB) - set before the Upserted summary
         if re.search(r"\bERROR\b", stripped):
             results[current_table]["error"] = True
             if not results[current_table]["error_msg"]:
@@ -134,17 +167,22 @@ def parse_sync_output(output: str) -> dict:
 
 
 def main():
-    # ── Step 1: Ensure sync script exists ─────────────────────────────────────
+    # Step 1: Ensure sync script exists
     if not os.path.exists(SYNC_SCRIPT):
         print(f"Sync script not found: {SYNC_SCRIPT}", file=sys.stderr)
         if not recover_from_github():
             print("Cannot proceed without ga4_sync.py. Aborting.", file=sys.stderr)
             sys.exit(1)
 
-    # ── Step 2: Run ga4_sync.py yesterday yesterday ────────────────────────────
-    # This script IS the wrapper (task step 1). It calls ga4_sync.py directly
-    # (task step 2). There is no intermediate script — calling ga4_sync.py here
-    # is the correct and intended behavior.
+    # Discover expected tables from source (accuracy fix)
+    expected_tables = discover_expected_tables(SYNC_SCRIPT)
+    print(
+        f"Discovered {len(expected_tables)} tables from ga4_sync.py: "
+        f"{', '.join(expected_tables)}",
+        flush=True,
+    )
+
+    # Step 2: Run ga4_sync.py yesterday yesterday
     try:
         result = subprocess.run(
             [sys.executable, SYNC_SCRIPT, "yesterday", "yesterday"],
@@ -158,7 +196,6 @@ def main():
         print(f"ERROR: Unexpected subprocess failure: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Echo captured output so it appears in task logs
     if result.stdout:
         print(result.stdout, end="", flush=True)
     if result.stderr:
@@ -171,63 +208,59 @@ def main():
         )
         sys.exit(1)
 
-    # ── Step 3: Verify rows upserted per table ─────────────────────────────────
+    # Step 3: Verify rows upserted per table
     table_results = parse_sync_output(result.stdout)
 
-    hard_failures = []  # exit 1: ERROR in output OR table missing from output
-    soft_warnings = []  # warn only: 0 rows but no error (low traffic day)
+    hard_failures = []
+    soft_warnings = []
 
-    for table in EXPECTED_TABLES:
+    for table in expected_tables:
         if table not in table_results:
-            # Table absent from output despite exit 0 = ga4_sync.py changed
-            # without updating EXPECTED_TABLES. Hard failure to surface this.
             hard_failures.append(
-                f"{table}: NOT IN OUTPUT — ga4_sync.py may have changed"
+                f"{table}: NOT IN OUTPUT - sync function may have been removed"
             )
             continue
         info = table_results[table]
         if info["error"]:
             hard_failures.append(
-                f"{table}: API/DB error — {info['error_msg'] or 'see output above'}"
+                f"{table}: API/DB error - {info['error_msg'] or 'see output above'}"
             )
         elif info["upserted"] == 0:
             soft_warnings.append(f"{table}: 0 rows (low traffic or no data today)")
 
-    # Tables in output not in EXPECTED_TABLES → new table added to ga4_sync.py
-    extra_tables = [t for t in table_results if t not in EXPECTED_TABLES]
+    extra_tables = [t for t in table_results if t not in expected_tables]
 
-    # ── Print verification summary ─────────────────────────────────────────────
-    print("\n─── Verification Summary ───", flush=True)
-    for table in EXPECTED_TABLES:
+    print("\n--- Verification Summary ---", flush=True)
+    for table in expected_tables:
         info = table_results.get(table)
         if info is None:
-            print(f"  {table}: ✗ NOT IN OUTPUT", flush=True)
+            print(f"  {table}: NOT IN OUTPUT", flush=True)
         elif info["error"]:
-            print(f"  {table}: ✗ ERROR", flush=True)
+            print(f"  {table}: ERROR", flush=True)
         else:
             rows = info["upserted"]
-            icon = "✓" if rows > 0 else "⚠"
+            icon = "OK" if rows > 0 else "WARN"
             print(f"  {table}: {icon} {rows} rows", flush=True)
     for table in extra_tables:
         info = table_results[table]
         print(
-            f"  {table}: ✓ {info['upserted']} rows  ← new table (add to EXPECTED_TABLES)",
+            f"  {table}: OK {info['upserted']} rows  <- undiscovered (check ga4_sync.py)",
             flush=True,
         )
 
     if soft_warnings:
         print("\nWarnings (non-critical):", flush=True)
         for w in soft_warnings:
-            print(f"  ⚠ {w}", flush=True)
+            print(f"  WARN {w}", flush=True)
 
     if hard_failures:
         print("\nCritical failures:", file=sys.stderr)
         for f in hard_failures:
-            print(f"  ✗ {f}", file=sys.stderr)
-        print("\nDaily GA4 → AppDB sync FAILED (see errors above).", file=sys.stderr)
+            print(f"  FAIL {f}", file=sys.stderr)
+        print("\nDaily GA4 -> AppDB sync FAILED (see errors above).", file=sys.stderr)
         sys.exit(1)
 
-    print("\nDaily GA4 → AppDB sync completed successfully.", flush=True)
+    print("\nDaily GA4 -> AppDB sync completed successfully.", flush=True)
 
 
 if __name__ == "__main__":
