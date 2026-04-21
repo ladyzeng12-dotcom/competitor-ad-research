@@ -375,8 +375,8 @@ def sync_ga_user_events(date_ranges):
 
     NOTE: userPseudoId is NOT available for this GA4 property via the Data API
     (confirmed via metadata endpoint — dimension not in property's field catalog).
-    Table is implemented at (date x dateHourMinute x eventName x landingPage x
-    source_medium x campaign) granularity, aggregated across users.
+    Table is implemented at (date × dateHourMinute × eventName × landingPage ×
+    source_medium × campaign) granularity, aggregated across users.
     activeUsers metric is included as a proxy for per-bucket unique user count.
     For true per-user tracking, BigQuery export would be required.
 
@@ -441,7 +441,9 @@ def sync_ga_user_events(date_ranges):
             "event_count": safe_int(p["eventCount"]),
             "active_users": safe_int(p["activeUsers"]),
         })
-    appdb_upsert("ga_user_events", rows, ["date", "date_hour_minute", "event_name", "landing_page", "source_medium", "campaign"])
+    # batch_size=25: ga_user_events rows are wide (8 cols with long string values);
+    # 100-row batches exceed the 10,000-char SQL API limit. 25 rows ~5,500 chars safely under.
+    appdb_upsert("ga_user_events", rows, ["date", "date_hour_minute", "event_name", "landing_page", "source_medium", "campaign"], batch_size=25)
 
 
 def main():
