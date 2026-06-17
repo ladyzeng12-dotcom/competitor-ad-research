@@ -451,13 +451,12 @@ def sync_ga_user_events(date_ranges):
 def sync_ga_adgroup_landing_signups(date_ranges):
     """Sync Campaign → Ad Group → Landing Page → signup funnel for paid (cpc) traffic.
 
-    Two GA4 API calls are needed because sessions and sign_up counts cannot be
-    fetched in one request without distorting rows:
-      Call 1: sessions per (date, campaign, ad_group, landing_page), filtered to cpc
-      Call 2: sign_up eventCount per (date, campaign, ad_group, landing_page), filtered to cpc
+    Three GA4 API calls merged by PK (date, campaign_name, ad_group_name, landing_page):
+      Call 1: sessions (cpc filter)
+      Call 2: sign_up eventCount (cpc + eventName=sign_up filter)
+      Call 3: averageSessionDuration (cpc filter) → stored as avg_session_duration_seconds
 
-    Rows are merged by PK (date, campaign_name, ad_group_name, landing_page);
-    landing pages with zero sign-ups still appear (sign_ups defaults to 0).
+    Rows union all PKs from any call; missing values default to 0.
 
     campaign_name / ad_group_name use sessionCampaignName / sessionGoogleAdsAdGroupName
     — same dimensions as ga_events_by_creative for consistent JOIN caliber with gads_daily_cost.
@@ -492,6 +491,11 @@ def sync_ga_adgroup_landing_signups(date_ranges):
         dims, ["eventCount"], date_ranges, dimension_filter=signup_filter
     )
 
+    # Call 3: averageSessionDuration (cpc only)
+    raw_duration = run_ga4_report_paginated(
+        dims, ["averageSessionDuration"], date_ranges, dimension_filter=cpc_filter
+    )
+
     # Build sessions map
     sessions_map = {}
     for r in raw_sessions:
@@ -516,8 +520,20 @@ def sync_ga_adgroup_landing_signups(date_ranges):
         )
         signups_map[key] = safe_int(p["eventCount"])
 
-    # Merge: all keys that appear in either map
-    all_keys = set(sessions_map.keys()) | set(signups_map.keys())
+    # Build avg session duration map (GA4 returns seconds as float)
+    duration_map = {}
+    for r in raw_duration:
+        p = parse_row(r, dims, ["averageSessionDuration"])
+        key = (
+            normalize_date(p["date"]),
+            p["sessionCampaignName"],
+            p["sessionGoogleAdsAdGroupName"],
+            p["landingPage"],
+        )
+        duration_map[key] = round(safe_float(p["averageSessionDuration"]), 2)
+
+    # Merge: all keys that appear in any map
+    all_keys = set(sessions_map.keys()) | set(signups_map.keys()) | set(duration_map.keys())
     rows = []
     for key in all_keys:
         date, campaign_name, ad_group_name, landing_page = key
@@ -528,6 +544,7 @@ def sync_ga_adgroup_landing_signups(date_ranges):
             "landing_page": landing_page,
             "sessions": sessions_map.get(key, 0),
             "sign_ups": signups_map.get(key, 0),
+            "avg_session_duration_seconds": duration_map.get(key, 0.0),
         })
 
     # batch_size=25: rows contain multiple long string columns (campaign_name, ad_group_name, landing_page)
