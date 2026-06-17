@@ -555,6 +555,71 @@ def sync_ga_adgroup_landing_signups(date_ranges):
     )
 
 
+def sync_ga_landing_page_by_source(date_ranges):
+    """Sync landing page × source_medium funnel for ALL channels (no medium filter).
+
+    Two GA4 API calls merged by PK (date, landing_page, source_medium):
+      Call 1: sessions + averageSessionDuration (no filter — all organic, cpc, referral, direct, paid_social …)
+      Call 2: sign_up eventCount (filter eventName=sign_up)
+
+    PK uses sessionSourceMedium so rows are pre-split by channel; dashboard can filter freely.
+    Data tracked from 2026-04-09 onwards per project convention.
+    """
+    print("[ga_landing_page_by_source]", flush=True)
+    dims = ["date", "landingPage", "sessionSourceMedium"]
+    signup_filter = {
+        "filter": {
+            "fieldName": "eventName",
+            "stringFilter": {"matchType": "EXACT", "value": "sign_up"}
+        }
+    }
+
+    # Call 1: sessions + avg duration (all channels)
+    raw_sessions = run_ga4_report_paginated(
+        dims, ["sessions", "averageSessionDuration"], date_ranges
+    )
+
+    # Call 2: sign_up counts (all channels)
+    raw_signups = run_ga4_report_paginated(
+        dims, ["eventCount"], date_ranges, dimension_filter=signup_filter
+    )
+
+    # Build sessions + duration map
+    sessions_map = {}
+    for r in raw_sessions:
+        p = parse_row(r, dims, ["sessions", "averageSessionDuration"])
+        key = (normalize_date(p["date"]), p["landingPage"], p["sessionSourceMedium"])
+        sessions_map[key] = (safe_int(p["sessions"]), round(safe_float(p["averageSessionDuration"]), 2))
+
+    # Build sign-ups map
+    signups_map = {}
+    for r in raw_signups:
+        p = parse_row(r, dims, ["eventCount"])
+        key = (normalize_date(p["date"]), p["landingPage"], p["sessionSourceMedium"])
+        signups_map[key] = safe_int(p["eventCount"])
+
+    # Merge
+    all_keys = set(sessions_map.keys()) | set(signups_map.keys())
+    rows = []
+    for key in all_keys:
+        date, landing_page, source_medium = key
+        sess, dur = sessions_map.get(key, (0, 0.0))
+        rows.append({
+            "date": date,
+            "landing_page": landing_page,
+            "source_medium": source_medium,
+            "sessions": sess,
+            "sign_ups": signups_map.get(key, 0),
+            "avg_session_duration_seconds": dur,
+        })
+
+    appdb_upsert(
+        "ga_landing_page_by_source", rows,
+        ["date", "landing_page", "source_medium"],
+        batch_size=25
+    )
+
+
 def main():
     args = sys.argv[1:]
     if len(args) < 2:
@@ -578,6 +643,7 @@ def main():
     sync_ga_landing_page_events(date_ranges)
     sync_ga_user_events(date_ranges)
     sync_ga_adgroup_landing_signups(date_ranges)
+    sync_ga_landing_page_by_source(date_ranges)
 
     print("Done.", flush=True)
 
