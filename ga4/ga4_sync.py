@@ -230,9 +230,12 @@ def sync_ga_landing_page_metrics(date_ranges):
     rows = []
     for r in raw_rows:
         p = parse_row(r, dims, mets)
+        lp = p["landingPage"]
+        if lp.startswith("/p/"):
+            continue  # internal redirect/tracking page
         rows.append({
             "date": normalize_date(p["date"]),
-            "landing_page": p["landingPage"],
+            "landing_page": lp,
             "sessions": safe_int(p["sessions"]),
             "active_users": safe_int(p["activeUsers"]),
             "bounce_rate": safe_float(p["bounceRate"]),
@@ -340,9 +343,12 @@ def sync_ga_landing_page_events(date_ranges):
     rows = []
     for r in raw_rows:
         p = parse_row(r, dims, mets)
+        lp = p["landingPage"]
+        if lp.startswith("/p/"):
+            continue  # internal redirect/tracking page
         rows.append({
             "date": normalize_date(p["date"]),
-            "landing_page": p["landingPage"],
+            "landing_page": lp,
             "event_name": p["eventName"],
             "event_count": safe_int(p["eventCount"]),
             "active_users": safe_int(p["activeUsers"]),
@@ -433,11 +439,14 @@ def sync_ga_user_events(date_ranges):
     rows = []
     for r in raw_rows:
         p = parse_row(r, dims, mets)
+        lp = p["landingPage"]
+        if lp.startswith("/p/"):
+            continue  # internal redirect/tracking page
         rows.append({
             "date": normalize_date(p["date"]),
             "date_hour_minute": normalize_date_hour_minute(p["dateHourMinute"]),
             "event_name": p["eventName"],
-            "landing_page": p["landingPage"],
+            "landing_page": lp,
             "source_medium": p["sessionSourceMedium"],
             "campaign": p["sessionCampaignName"],
             "event_count": safe_int(p["eventCount"]),
@@ -532,11 +541,13 @@ def sync_ga_adgroup_landing_signups(date_ranges):
         )
         duration_map[key] = round(safe_float(p["averageSessionDuration"]), 2)
 
-    # Merge: all keys that appear in any map
+    # Merge: all keys that appear in any map; skip /p/... redirect pages
     all_keys = set(sessions_map.keys()) | set(signups_map.keys()) | set(duration_map.keys())
     rows = []
     for key in all_keys:
         date, campaign_name, ad_group_name, landing_page = key
+        if landing_page.startswith("/p/"):
+            continue  # internal redirect/tracking page — not a real landing page
         rows.append({
             "date": date,
             "campaign_name": campaign_name,
@@ -598,11 +609,13 @@ def sync_ga_landing_page_by_source(date_ranges):
         key = (normalize_date(p["date"]), p["landingPage"], p["sessionSourceMedium"])
         signups_map[key] = safe_int(p["eventCount"])
 
-    # Merge
+    # Merge; skip /p/... redirect pages
     all_keys = set(sessions_map.keys()) | set(signups_map.keys())
     rows = []
     for key in all_keys:
         date, landing_page, source_medium = key
+        if landing_page.startswith("/p/"):
+            continue  # internal redirect/tracking page
         sess, dur = sessions_map.get(key, (0, 0.0))
         rows.append({
             "date": date,
