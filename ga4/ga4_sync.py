@@ -315,7 +315,9 @@ def sync_ga_events_by_creative(date_ranges):
             "event_name": p["eventName"],
             "event_count": safe_int(p["eventCount"]),
         })
-    appdb_upsert("ga_events_by_creative", rows, ["date", "campaign_name", "ad_group", "ad_content", "event_name"])
+    # batch_size=25: ga_events_by_creative rows are wide (campaign_name, ad_group, event_name are long strings);
+    # 100-row batches can exceed 10,000-char SQL limit — same fix applied to ga_user_events on 2026-04-21.
+    appdb_upsert("ga_events_by_creative", rows, ["date", "campaign_name", "ad_group", "ad_content", "event_name"], batch_size=25)
 
 
 def sync_ga_landing_page_events(date_ranges):
@@ -442,8 +444,98 @@ def sync_ga_user_events(date_ranges):
             "active_users": safe_int(p["activeUsers"]),
         })
     # batch_size=25: ga_user_events rows are wide (8 cols with long string values);
-    # 100-row batches exceed the 10,000-char SQL API limit. 25 rows ~5,500 chars safely under.
+    # 100-row batches exceed the 10,000-char SQL API limit. 25 rows ≈ 5,500 chars — safely under.
     appdb_upsert("ga_user_events", rows, ["date", "date_hour_minute", "event_name", "landing_page", "source_medium", "campaign"], batch_size=25)
+
+
+def sync_ga_adgroup_landing_signups(date_ranges):
+    """Sync Campaign → Ad Group → Landing Page → signup funnel for paid (cpc) traffic.
+
+    Two GA4 API calls are needed because sessions and sign_up counts cannot be
+    fetched in one request without distorting rows:
+      Call 1: sessions per (date, campaign, ad_group, landing_page), filtered to cpc
+      Call 2: sign_up eventCount per (date, campaign, ad_group, landing_page), filtered to cpc
+
+    Rows are merged by PK (date, campaign_name, ad_group_name, landing_page);
+    landing pages with zero sign-ups still appear (sign_ups defaults to 0).
+
+    campaign_name / ad_group_name use sessionCampaignName / sessionGoogleAdsAdGroupName
+    — same dimensions as ga_events_by_creative for consistent JOIN caliber with gads_daily_cost.
+    """
+    print("[ga_adgroup_landing_signups]", flush=True)
+    dims = ["date", "sessionCampaignName", "sessionGoogleAdsAdGroupName", "landingPage"]
+    cpc_filter = {
+        "filter": {
+            "fieldName": "sessionMedium",
+            "stringFilter": {"matchType": "EXACT", "value": "cpc"}
+        }
+    }
+
+    # Call 1: sessions (cpc only)
+    raw_sessions = run_ga4_report_paginated(dims, ["sessions"], date_ranges, dimension_filter=cpc_filter)
+
+    # Call 2: sign_up event counts (cpc only)
+    signup_filter = {
+        "andGroup": {
+            "expressions": [
+                cpc_filter,
+                {
+                    "filter": {
+                        "fieldName": "eventName",
+                        "stringFilter": {"matchType": "EXACT", "value": "sign_up"}
+                    }
+                }
+            ]
+        }
+    }
+    raw_signups = run_ga4_report_paginated(
+        dims, ["eventCount"], date_ranges, dimension_filter=signup_filter
+    )
+
+    # Build sessions map
+    sessions_map = {}
+    for r in raw_sessions:
+        p = parse_row(r, dims, ["sessions"])
+        key = (
+            normalize_date(p["date"]),
+            p["sessionCampaignName"],
+            p["sessionGoogleAdsAdGroupName"],
+            p["landingPage"],
+        )
+        sessions_map[key] = safe_int(p["sessions"])
+
+    # Build sign-ups map
+    signups_map = {}
+    for r in raw_signups:
+        p = parse_row(r, dims, ["eventCount"])
+        key = (
+            normalize_date(p["date"]),
+            p["sessionCampaignName"],
+            p["sessionGoogleAdsAdGroupName"],
+            p["landingPage"],
+        )
+        signups_map[key] = safe_int(p["eventCount"])
+
+    # Merge: all keys that appear in either map
+    all_keys = set(sessions_map.keys()) | set(signups_map.keys())
+    rows = []
+    for key in all_keys:
+        date, campaign_name, ad_group_name, landing_page = key
+        rows.append({
+            "date": date,
+            "campaign_name": campaign_name,
+            "ad_group_name": ad_group_name,
+            "landing_page": landing_page,
+            "sessions": sessions_map.get(key, 0),
+            "sign_ups": signups_map.get(key, 0),
+        })
+
+    # batch_size=25: rows contain multiple long string columns (campaign_name, ad_group_name, landing_page)
+    appdb_upsert(
+        "ga_adgroup_landing_signups", rows,
+        ["date", "campaign_name", "ad_group_name", "landing_page"],
+        batch_size=25
+    )
 
 
 def main():
@@ -456,7 +548,7 @@ def main():
     start_date = resolve_date(args[0])
     end_date = resolve_date(args[1])
     date_ranges = [{"startDate": start_date, "endDate": end_date}]
-    print(f"Syncing GA4 data: {start_date} -> {end_date}", flush=True)
+    print(f"Syncing GA4 data: {start_date} → {end_date}", flush=True)
 
     sync_ga_daily_metrics(date_ranges)
     sync_ga_channel_metrics(date_ranges)
@@ -468,6 +560,7 @@ def main():
     sync_ga_device_platform_metrics(date_ranges)
     sync_ga_landing_page_events(date_ranges)
     sync_ga_user_events(date_ranges)
+    sync_ga_adgroup_landing_signups(date_ranges)
 
     print("Done.", flush=True)
 
